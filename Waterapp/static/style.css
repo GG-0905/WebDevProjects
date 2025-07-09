@@ -1,0 +1,24 @@
+body {
+    font-family: sans-serif;
+    padding: 20px;
+    background-color: #f9f9f9;
+}
+
+h2 {
+    color: #2d8f5c;
+}
+
+form {
+    line-height: 2;
+    background: #fff;
+    padding: 15px;
+    border-radius: 6px;
+    width: 300px;
+}
+
+input, button {
+    width: 100%;
+    padding: 6px;
+}
+
+
