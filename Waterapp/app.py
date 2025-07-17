@@ -1,112 +1,114 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_file
 import ee
-import folium
-import geemap.foliumap as geemap
-import branca
+import geemap
 import os
+import json
 from datetime import datetime, timedelta
 
-# Authenticate and initialize EE
+# Authenticate and Initialize Earth Engine
 ee.Authenticate()
 ee.Initialize(project='isrofirstproject')
 
 app = Flask(__name__)
 
-def get_ndwi_and_water_count(lat, lon, date_str):
-    point = ee.Geometry.Point(lon, lat)
+def get_mndwi_water_from_bounds(bounds, date_str):
+    coords = bounds['coordinates'][0]
+    roi = ee.Geometry.Polygon(coords)
 
-    # ±15 day window
+    # Date range
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     start_date = (date_obj - timedelta(days=15)).strftime("%Y-%m-%d")
     end_date = (date_obj + timedelta(days=15)).strftime("%Y-%m-%d")
 
-    collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
-        .filterBounds(point) \
+    # Sentinel-2 Collection
+    collection = ee.ImageCollection('COPERNICUS/S2_HARMONIZED') \
+        .filterBounds(roi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 40)) \
-        .sort('CLOUDY_PIXEL_PERCENTAGE')
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)) \
+        .map(lambda img: img.select(['B3', 'B11']))
 
     if collection.size().getInfo() == 0:
-        collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
-            .filterBounds(point) \
-            .filterDate(start_date, end_date) \
-            .sort('CLOUDY_PIXEL_PERCENTAGE')
+        raise Exception("No Sentinel-2 images found in date range.")
 
-    if collection.size().getInfo() == 0:
-        raise Exception("No image found for the given date range and location.")
-
-    image = collection.first()
+    # Compute MNDWI
+    image = collection.median()
     green = image.select('B3')
-    nir = image.select('B8')
-    ndwi = green.subtract(nir).divide(green.add(nir)).rename('NDWI')
+    swir = image.select('B11')
+    mndwi = green.subtract(swir).divide(green.add(swir)).rename('MNDWI')
+    water_mask = mndwi.gt(0).selfMask()
 
-    # NDWI threshold and mask
-    water_mask = ndwi.gt(0.3).selfMask()
+    # Calculate total water area
+    pixel_area = water_mask.multiply(ee.Image.pixelArea())
+    total_area = pixel_area.reduceRegion(
+        ee.Reducer.sum(), roi, 10, maxPixels=1e9
+    ).get('MNDWI')
+    area_km2 = ee.Number(total_area).divide(1e6).getInfo()
 
-    # Connected components
-    connected = water_mask.connectedComponents(ee.Kernel.plus(1), maxSize=128)
-    sizes = connected.select('labels').connectedPixelCount(128, True)
-    filtered = connected.updateMask(sizes.gte(100))  # keep only ≥100 pixels
-
-    # Count distinct water bodies
-    water_bodies = filtered.select('labels').reduceRegion(
-        reducer=ee.Reducer.countDistinctNonNull(),
-        geometry=point.buffer(15000),
+    # Convert water mask to polygons
+    vectors = water_mask.reduceToVectors(
+        geometry=roi,
         scale=10,
+        geometryType='polygon',
+        reducer=ee.Reducer.countEvery(),
         maxPixels=1e9
     )
 
-    count = water_bodies.getNumber('labels').getInfo()
+    # ✅ Filter small areas (< 100,000 m² = 10 hectares)
+    vectors = vectors.map(
+        lambda f: f.set({'area_m2': f.geometry().area(maxError=1)})
+    ).filter(ee.Filter.gt('area_m2', 100000))
 
-    # Visualization layers
-    rgb = image.visualize(bands=['B4', 'B3', 'B2'], min=0, max=3000)
-    water_vis = water_mask.visualize(palette=['0000FF'], opacity=0.6)
+    # ✅ Merge fragments into single water bodies
+    dissolved = vectors.union(maxError=1)
 
-    m = folium.Map(location=[lat, lon], zoom_start=12)
-    m.add_child(geemap.ee_tile_layer(rgb, {}, 'RGB'))
-    m.add_child(geemap.ee_tile_layer(water_vis, {}, 'Water Mask'))
+    # ✅ Convert to GeoJSON
+    geojson = geemap.ee_to_geojson(dissolved)
+    os.makedirs("static/geojson", exist_ok=True)
+    with open("static/geojson/water.geojson", "w") as f:
+        json.dump(geojson, f)
 
-    roi = ee.Geometry.Point(lon, lat).buffer(15000)
-    folium.GeoJson(
-        geemap.ee_to_geojson(roi),
-        name='Region of Interest',
-        style_function=lambda x: {
-            'fillColor': '#FF0000',
-            'color': '#FF0000',
-            'weight': 2,
-            'fillOpacity': 0.1,
-        }
-    ).add_to(m)
+    # ✅ Final waterbody count
+    count = len(geojson['features'])
 
-    colormap = branca.colormap.linear.YlGnBu_09.scale(-1, 1)
-    colormap.caption = 'NDWI Water Confidence'
-    m.add_child(colormap)
-    folium.LayerControl().add_to(m)
+    # Create map
+    center = roi.centroid().coordinates().getInfo()[::-1]
+    m = geemap.Map(center=center, zoom=13)
 
-    # Save map
-    map_path = os.path.join('templates', 'map.html')
-    m.save(map_path)
+    rgb_vis = image.visualize(bands=['B3', 'B11', 'B3'], min=0, max=3000)
+    water_vis = water_mask.visualize(palette=['0000FF'], opacity=0.5)
 
-    return count
+    m.add_layer(rgb_vis, {}, "RGB")
+    m.add_layer(water_vis, {}, "Water")
 
-@app.route('/', methods=['GET', 'POST'])
+    # ✅ Show ROI outline
+    roi_feature = ee.Feature(roi)
+    roi_fc = ee.FeatureCollection([roi_feature])
+    roi_style = {'color': 'red', 'fillColor': '00000000', 'width': 2}
+    m.add_layer(roi_fc.style(**roi_style), {}, "ROI")
+
+    m.to_html("templates/map.html")
+
+    return count, round(area_km2, 2)
+
+@app.route("/", methods=["GET", "POST"])
 def index():
-    if request.method == 'POST':
-        lat = float(request.form['latitude'])
-        lon = float(request.form['longitude'])
-        date = request.form['single_date']
-
+    if request.method == "POST":
         try:
-            count = get_ndwi_and_water_count(lat, lon, date)
-            return render_template('result.html', count=count)
+            bounds = json.loads(request.form['bounds'])
+            date = request.form['date']
+            count, area = get_mndwi_water_from_bounds(bounds, date)
+            return render_template("result.html", count=count, area=area)
         except Exception as e:
-            return render_template('index.html', error=str(e))
-    
-    return render_template('index.html')
+            return render_template("index.html", error=str(e))
+    return render_template("index.html")
 
-@app.route('/map')
-def map_view():
-    return render_template('map.html')
+@app.route("/map")
+def map_page():
+    return render_template("map.html")
 
-if __name__ == '__main__':
+@app.route("/download")
+def download_geojson():
+    return send_file("static/geojson/water.geojson", as_attachment=True)
+
+if __name__ == "__main__":
     app.run(debug=True)
