@@ -1,5 +1,5 @@
 flask
 earthengine-api
-geemap
-folium
+geemap[folium]
 branca
+folium
