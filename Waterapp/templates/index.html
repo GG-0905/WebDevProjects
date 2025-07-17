@@ -1,30 +1,26 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>NDWI Water Detection</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <title>Water Body Detection</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
 </head>
 <body>
-    <h2>🌊 NDWI Water Body Detection</h2>
-
-    {% if error %}
-        <p style="color:red;">⚠️ {{ error }}</p>
-    {% endif %}
-
+    <h2>Detect Water Bodies using MNDWI</h2>
     <form method="POST">
-        <label>Latitude:</label>
-        <input type="number" step="0.0001" name="latitude" required><br>
-
-        <label>Longitude:</label>
-        <input type="number" step="0.0001" name="longitude" required><br>
-
-        <label>Date:</label>
-        <input type="date" name="single_date" required><br>
-
-        <button type="submit">Analyze</button>
+        <label>Select Date: <input type="date" name="date" required></label><br><br>
+        <div id="map" style="height: 400px;"></div><br>
+        <input type="hidden" name="bounds" id="bounds" required>
+        <input type="submit" value="Submit">
     </form>
+    {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+    <script src="/static/draw.js"></script>
 </body>
 </html>
+
+
 
 
 
